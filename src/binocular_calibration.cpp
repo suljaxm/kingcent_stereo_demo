@@ -170,7 +170,7 @@ int main(){
 		computeCorrespondEpilines(imgpt[0], 0 + 1, F, lines[0]);
 
 		imgpt[1] = Mat(imagePoints_r[i]); 
-		undistortPoints(imgpt[1], imgpt[1], cameraMatrix[1], distCoeffs[1], Mat(), cameraMatrix[1]); //����У����Ľǵ�����
+		undistortPoints(imgpt[1], imgpt[1], cameraMatrix[1], distCoeffs[1], Mat(), cameraMatrix[1]); 
 		computeCorrespondEpilines(imgpt[1], 1 + 1, F, lines[1]); 
 
 		for (int j = 0; j < npt; j++)

@@ -28,6 +28,9 @@ ERROR_CODE Initialize(int deviceID){
 	return INITIALIZING;
 }
 
+void disp2Depth(cv::Mat dispMap, cv::Mat &depthMap);
+void insertDepth32f(cv::Mat& depth);
+
 int  main()
 {
 	Mat frame;
@@ -192,36 +195,186 @@ int  main()
 		imshow("imgLeft", imgLeft);
 		imshow("imgRight", imgRight);
 
-		Ptr<StereoSGBM> sgbm = StereoSGBM::create(0, 64, 7,
-		10 * 7 * 7,
-		40 * 7 * 7,
-		1, 63, 10, 100, 32, StereoSGBM::MODE_SGBM);
+		int minDisparity = 0;  		// 最小的视差值
+		int numDisparities = ((imgLeft.cols / 8) + 15) & -16;; 	// 视差范围，即最大视差值和最小视差值之差，必须是16的倍数 ((imgSize.width / 8) + 15) & -16
+		int blockSize = 3; 			// 匹配块大小（SADWindowSize），必须是大于等于1的奇数，一般为3~11
+		int cn = imgLeft.channels(); 
+		int P1 = 8*cn*blockSize*blockSize; 	// 惩罚系数，一般：P1=8*通道数*SADWindowSize*SADWindowSize
+		int P2 = 4*P2; 		        // P2=4*P1
+		int disp12MaxDiff = 1; 		// 左右视差图的最大容许差异（超过将被清零），默认为 -1，即不执行左右视差检查
+		int preFiterCap = 32;		// 预滤波图像像素的截断值。该算法首先计算每个像素的x导数，并通过[-preFilterCap，preFilterCap]间隔剪切其值。结果值被传递给Birchfield-Tomasi像素成本函数。
+		int uniquenessRatio = 10;   // 视差唯一性百分比， 视差窗口范围内最低代价是次低代价的(1 + uniquenessRatio/100)倍时，最低代价对应的视差值才是该像素点的视差，否则该像素点的视差为 0，通常为5~15.
+		int speckleWindowSize = 100;
+		int speckleRange = 32;		// 视差变化阈值
+		int mode = StereoSGBM::MODE_SGBM;
+
+		static Ptr<StereoSGBM> sgbm = StereoSGBM::create(
+		minDisparity,
+		numDisparities,
+		blockSize,
+		P1,
+		P2,
+		disp12MaxDiff,
+		preFiterCap,
+		uniquenessRatio,
+		speckleWindowSize,
+		speckleRange,
+		mode);
 
 		//-- And create the image in which we will save our disparities
 		Mat sgbmDisp16S = Mat(imgLeft.rows, imgLeft.cols, CV_16S);
 		Mat sgbmDisp8U = Mat(imgLeft.rows, imgLeft.cols, CV_8UC1);
 
 		sgbm->compute(imgLeft, imgRight, sgbmDisp16S);
+		sgbmDisp16S.convertTo(sgbmDisp8U, CV_8UC1, 255.0 / (numDisparities*16.0)); //将16位符号整形的视差矩阵转换为8位无符号整形矩阵
 
-		sgbmDisp16S.convertTo(sgbmDisp8U, CV_8UC1, 255.0 / 1000.0);
-		cv::compare(sgbmDisp16S, 0, Mask, CMP_GE);
-		applyColorMap(sgbmDisp8U, sgbmDisp8U, COLORMAP_HSV);
-		Mat  sgbmDisparityShow, sgnm[3];
+		cv::imshow("disparity", sgbmDisp8U);
+
+		Mat  sgbmDisparityShow;
 		sgbmDisp8U.copyTo(sgbmDisparityShow, Mask);
 
-		int pix = sgbmDisparityShow.at<Vec3b>(170, 150)[1];//
-		double alpha = 0.35;
-		double intercept = 24.75; //
-		int distance = pix * alpha + intercept;//
-		cout << distance << "cm" << endl;
+		Mat depth = Mat(imgLeft.rows, imgLeft.cols, CV_16UC1);
+		disp2Depth(sgbmDisparityShow, depth);
 
-		split(sgbmDisparityShow, sgnm);
-		// imshow("sgbmDisparity", sgbmDisparityShow);//
-		imshow("sgbm", sgnm[1]); // Grayscale display
+		cv::imshow("depth", depth); 
 
+		// insertDepth32f(depth);  // error?
+		// cv::imshow("depth2", depth);
 		char c = (char)waitKey(1);
 		if (c == 27 || c == 'q' || c == 'Q')
 			break;
 	}
 	return 0;
+}
+
+/*
+函数作用：视差图转深度图
+输入：
+　　dispMap ----视差图，8位单通道，CV_8UC1
+输出：
+　　depthMap ----深度图，16位无符号单通道，CV_16UC1
+*/
+void disp2Depth(cv::Mat dispMap, cv::Mat &depthMap)
+{
+    int type = dispMap.type();
+
+	double baseline = 1.0394043770848877e+02; // 基线距离100 mm
+	double fx = 4.8285420143582115e+02;
+    if (type == CV_8U)
+    {
+        int height = dispMap.rows;
+        int width = dispMap.cols;
+
+        uchar* dispData = (uchar*)dispMap.data;
+        ushort* depthData = (ushort*)depthMap.data;
+        for (int i = 0; i < height; i++)
+        {
+            for (int j = 0; j < width; j++)
+            {
+                int id = i*width + j;
+                if (!dispData[id]){
+					// depthData[id] = 0;//
+					continue;  //防止0除
+				}  
+                depthData[id] = ushort( (float)fx *baseline / ((float)dispData[id]) );
+            }
+        }
+    }
+    else
+    {
+        cout << "please confirm dispImg's type!" << endl;
+        cv::waitKey(0);
+    }
+}
+
+void insertDepth32f(cv::Mat &depth)
+{
+    const int width = depth.cols;
+    const int height = depth.rows;
+    float* data = (float*)depth.data;
+    cv::Mat integralMap = cv::Mat::zeros(height, width, CV_64F);
+    cv::Mat ptsMap = cv::Mat::zeros(height, width, CV_32S);
+    double* integral = (double*)integralMap.data;
+    int* ptsIntegral = (int*)ptsMap.data;
+    memset(integral, 0, sizeof(double) * width * height);
+    memset(ptsIntegral, 0, sizeof(int) * width * height);
+	cout << "ok>" << endl;
+    for (int i = 0; i < height; ++i)
+    {
+        int id1 = i * width;
+        for (int j = 0; j < width; ++j)
+        {
+            int id2 = id1 + j;
+            if (data[id2] > 1e-3)
+            {
+                integral[id2] = data[id2];
+                ptsIntegral[id2] = 1;
+            }
+        }
+    }
+	cout << "1 " << endl;
+    // 积分区间
+    for (int i = 0; i < height; ++i)
+    {
+        int id1 = i * width;
+        for (int j = 1; j < width; ++j)
+        {
+            int id2 = id1 + j;
+            integral[id2] += integral[id2 - 1];
+            ptsIntegral[id2] += ptsIntegral[id2 - 1];
+        }
+    }
+    for (int i = 1; i < height; ++i)
+    {
+        int id1 = i * width;
+        for (int j = 0; j < width; ++j)
+        {
+            int id2 = id1 + j;
+            integral[id2] += integral[id2 - width];
+            ptsIntegral[id2] += ptsIntegral[id2 - width];
+        }
+    }
+    int wnd;
+    double dWnd = 2;
+    while (dWnd > 1)
+    {
+        wnd = int(dWnd);
+        dWnd /= 2;
+        for (int i = 0; i < height; ++i)
+        {
+            int id1 = i * width;
+            for (int j = 0; j < width; ++j)
+            {
+                int id2 = id1 + j;
+                int left = j - wnd - 1;
+                int right = j + wnd;
+                int top = i - wnd - 1;
+                int bot = i + wnd;
+                left = max(0, left);
+                right = min(right, width - 1);
+                top = max(0, top);
+                bot = min(bot, height - 1);
+                int dx = right - left;
+                int dy = (bot - top) * width;
+                int idLeftTop = top * width + left;
+                int idRightTop = idLeftTop + dx;
+                int idLeftBot = idLeftTop + dy;
+                int idRightBot = idLeftBot + dx;
+                int ptsCnt = ptsIntegral[idRightBot] + ptsIntegral[idLeftTop] - (ptsIntegral[idLeftBot] + ptsIntegral[idRightTop]);
+                double sumGray = integral[idRightBot] + integral[idLeftTop] - (integral[idLeftBot] + integral[idRightTop]);
+                if (ptsCnt <= 0)
+                {
+                    continue;
+                }
+                data[id2] = float(sumGray / ptsCnt);
+            }
+        }
+		cout << "3" << endl;
+        int s = wnd / 2 * 2 + 1;
+        if (s > 201)
+        {
+            s = 201;
+        }
+        // cv::GaussianBlur(depth, depth, cv::Size(s, s), s, s);
+    }
 }
